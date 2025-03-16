@@ -25,7 +25,7 @@ import {
   stripUndefinedProps,
   z,
 } from '@genkit-ai/core';
-import { lazy } from '@genkit-ai/core/async';
+import { Channel, lazy } from '@genkit-ai/core/async';
 import { logger } from '@genkit-ai/core/logging';
 import { Registry } from '@genkit-ai/core/registry';
 import { toJsonSchema } from '@genkit-ai/core/schema';
@@ -38,6 +38,7 @@ import {
   generate,
   GenerateOptions,
   GenerateResponse,
+  GenerateResponseChunk,
   generateStream,
   GenerateStreamResponse,
   OutputOptions,
@@ -438,6 +439,8 @@ function wrapInExecutablePrompt<
     input?: I,
     opts?: PromptGenerateOptions<O, CustomOptions>
   ): Promise<GenerateResponse<z.infer<O>>> => {
+    logger.debug('EXEC');
+
     return await runInNewSpan(
       registry,
       {
@@ -463,6 +466,8 @@ function wrapInExecutablePrompt<
     input?: I,
     opts?: PromptGenerateOptions<O, CustomOptions>
   ): Promise<GenerateOptions<O, CustomOptions>> => {
+    logger.debug('\n\nRENDER\n\n');
+
     return {
       ...(await renderOptionsFn(input, opts)),
     } as GenerateOptions<O, CustomOptions>;
@@ -472,7 +477,49 @@ function wrapInExecutablePrompt<
     input?: I,
     opts?: PromptGenerateOptions<O, CustomOptions>
   ): GenerateStreamResponse<z.infer<O>> => {
-    return generateStream(registry, renderOptionsFn(input, opts));
+    let channel = new Channel<GenerateResponseChunk>();
+
+    const streamed = rendererAction.then(async (promptAction) => {
+      const generated = runInNewSpan(
+        registry,
+        {
+          metadata: {
+            name: promptAction.__action.name,
+            input,
+          },
+          labels: {
+            [SPAN_TYPE_ATTR]: 'util',
+          },
+        },
+        async (metadata) => {
+          console.log('\n\nABOUT TO GENERATE DA STREAM\n\n');
+
+          const { response: res, stream: str } = generateStream(
+            registry,
+            renderOptionsFn(input, opts)
+          );
+          for await (let chunk of str) {
+            console.log(`stream chunk: ${chunk}`);
+            logger.info(chunk);
+            channel.send(chunk);
+          }
+          //metadata.output = await response;
+          return res;
+        }
+      ).then((res) => res);
+
+      generated.then(
+        () => channel.close(),
+        (err) => channel.error(err)
+      );
+
+      return generated;
+    });
+
+    return {
+      response: streamed,
+      stream: channel,
+    };
   };
 
   executablePrompt.asTool = async (): Promise<ToolAction<I, O>> => {
