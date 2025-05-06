@@ -15,15 +15,16 @@
  */
 
 export { RuntimeEvent, RuntimeInfo } from '../manager/types';
-export { GenkitErrorData } from '../types/error';
+export { GenkitError } from '../types/error';
 export * from './action';
 export * from './analytics';
 export * from './apis';
+export * from './document';
 export * from './env';
 export * from './eval';
-export * from './evaluators';
+export * from './evaluator';
 export * from './model';
 export * from './prompt';
-export * from './retrievers';
+export * from './retriever';
 export * from './status';
 export * from './trace';

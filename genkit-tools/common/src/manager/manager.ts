@@ -25,13 +25,17 @@ import {
   RunActionResponseSchema,
 } from '../types/action';
 import * as apis from '../types/apis';
-import { GenkitErrorData } from '../types/error';
+import { GenkitError } from '../types/error';
 import { TraceData } from '../types/trace';
 import { logger } from '../utils/logger';
 import {
+  DevToolsInfo,
   checkServerHealth,
   findRuntimesDir,
+  findServersDir,
+  isValidDevToolsInfo,
   projectNameFromGenkitFilePath,
+  removeToolsInfoFile,
   retriable,
 } from '../utils/utils';
 import {
@@ -54,6 +58,7 @@ interface RuntimeManagerOptions {
 
 export class RuntimeManager {
   private filenameToRuntimeMap: Record<string, RuntimeInfo> = {};
+  private filenameToDevUiMap: Record<string, DevToolsInfo> = {};
   private idToFileMap: Record<string, string> = {};
   private eventEmitter = new EventEmitter();
 
@@ -71,6 +76,7 @@ export class RuntimeManager {
       options.manageHealth ?? true
     );
     await manager.setupRuntimesWatcher();
+    await manager.setupDevUiWatcher();
     if (manager.manageHealth) {
       setInterval(
         async () => await manager.performHealthChecks(),
@@ -108,6 +114,18 @@ export class RuntimeManager {
     return runtimes.length === 0
       ? undefined
       : runtimes.reduce((a, b) =>
+          new Date(a.timestamp) > new Date(b.timestamp) ? a : b
+        );
+  }
+
+  /**
+   * Gets the Dev UI that was started most recently.
+   */
+  getMostRecentDevUI(): DevToolsInfo | undefined {
+    const toolsInfo = Object.values(this.filenameToDevUiMap);
+    return toolsInfo.length === 0
+      ? undefined
+      : toolsInfo.reduce((a, b) =>
           new Date(a.timestamp) > new Date(b.timestamp) ? a : b
         );
   }
@@ -250,7 +268,7 @@ export class RuntimeManager {
   async listTraces(
     input: apis.ListTracesRequest
   ): Promise<apis.ListTracesResponse> {
-    const { limit, continuationToken } = input;
+    const { limit, continuationToken, filter } = input;
     let query = '';
     if (limit) {
       query += `limit=${limit}`;
@@ -260,6 +278,12 @@ export class RuntimeManager {
         query += '&';
       }
       query += `continuationToken=${continuationToken}`;
+    }
+    if (filter) {
+      if (query !== '') {
+        query += '&';
+      }
+      query += `filter=${encodeURI(JSON.stringify(filter))}`;
     }
 
     const response = await axios
@@ -323,6 +347,73 @@ export class RuntimeManager {
       }
     } catch (error) {
       logger.error('Failed to set up runtimes watcher:', error);
+    }
+  }
+
+  /**
+   * Sets up a watcher for the servers directory.
+   */
+  private async setupDevUiWatcher() {
+    try {
+      const serversDir = await findServersDir();
+      await fs.mkdir(serversDir, { recursive: true });
+      const watcher = chokidar.watch(serversDir, {
+        persistent: true,
+        ignoreInitial: false,
+      });
+      watcher.on('add', (filePath) => this.handleNewDevUi(filePath));
+      if (this.manageHealth) {
+        watcher.on('unlink', (filePath) => this.handleRemovedDevUi(filePath));
+      }
+      // eagerly check existing Dev UI on first load.
+      for (const toolsInfo of await fs.readdir(serversDir)) {
+        await this.handleNewDevUi(path.resolve(serversDir, toolsInfo));
+      }
+    } catch (error) {
+      logger.error('Failed to set up tools server watcher:', error);
+    }
+  }
+
+  /**
+   * Handles a new Dev UI file.
+   */
+  private async handleNewDevUi(filePath: string) {
+    try {
+      const { content, toolsInfo } = await retriable(
+        async () => {
+          const content = await fs.readFile(filePath, 'utf-8');
+          const toolsInfo = JSON.parse(content) as DevToolsInfo;
+          return { content, toolsInfo };
+        },
+        { maxRetries: 10, delayMs: 500 }
+      );
+
+      if (isValidDevToolsInfo(toolsInfo)) {
+        const fileName = path.basename(filePath);
+        if (await checkServerHealth(toolsInfo.url)) {
+          this.filenameToDevUiMap[fileName] = toolsInfo;
+        } else {
+          logger.debug('Found an unhealthy tools config file', fileName);
+          await removeToolsInfoFile(fileName);
+        }
+      } else {
+        logger.error(`Unexpected file in the servers directory: ${content}`);
+      }
+    } catch (error) {
+      logger.info('Error reading tools config', error);
+      return undefined;
+    }
+  }
+
+  /**
+   * Handles a removed Dev UI file.
+   */
+  private handleRemovedDevUi(filePath: string) {
+    const fileName = path.basename(filePath);
+    if (fileName in this.filenameToDevUiMap) {
+      const toolsInfo = this.filenameToDevUiMap[fileName];
+      delete this.filenameToDevUiMap[fileName];
+      logger.debug(`Removed Dev UI with url ${toolsInfo.url}.`);
     }
   }
 
@@ -408,7 +499,7 @@ export class RuntimeManager {
         newError.message = (error.response?.data as any).message;
       }
       // we got a non-200 response; copy the payload and rethrow
-      newError.data = error.response.data as GenkitErrorData;
+      newError.data = error.response.data as GenkitError;
       throw newError;
     }
 
@@ -456,12 +547,19 @@ export class RuntimeManager {
  * Checks if the runtime file is valid.
  */
 function isValidRuntimeInfo(data: any): data is RuntimeInfo {
+  let timestamp = '';
+  // runtime filename might come with underscores due OS filename restrictions
+  // revert the underscores so the timestamp gets parsed correctly
+  if (typeof data.timestamp === 'string') {
+    timestamp = data.timestamp.replaceAll('_', ':');
+  }
+
   return (
     typeof data === 'object' &&
     typeof data.id === 'string' &&
     typeof data.pid === 'number' &&
     typeof data.reflectionServerUrl === 'string' &&
     typeof data.timestamp === 'string' &&
-    !isNaN(Date.parse(data.timestamp))
+    !isNaN(Date.parse(timestamp))
   );
 }

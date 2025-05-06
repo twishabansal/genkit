@@ -51,6 +51,7 @@ Most MCP servers are built to run as spawned processes on the same machine using
     - **`args`**: (optional) Array of string arguments to pass to the command.
     - **`env`**: (optional) Key value object of environment variables to pass to the command.
   - **`serverUrl`**: The URL of a remote server to connect to using the SSE MCP transport.
+  - **`serverWebsocketUrl`: The URL of a remote server to connect to using the WebSocket MCP transport.
   - **`transport`**: An existing MCP transport object for connecting to the server.
 - **`rawToolResponses`**: (optional) A boolean flag. If `true`, tool responses are returned in their raw MCP format; otherwise, they are processed for Genkit compatibility.
 
@@ -93,11 +94,12 @@ ai.defineTool(
 
 ai.definePrompt(
   {
-    name: 'happy',
-    description: 'everybody together now',
+    name: "happy",
+    description: "everybody together now",
     input: {
-      schema: z.object({ action: z.string().optional() }),
-      default: { action: 'clap your hands' },
+      schema: z.object({
+        action: z.string().default("clap your hands").optional(),
+      }),
     },
   },
   `If you're happy and you know it, {{action}}.`

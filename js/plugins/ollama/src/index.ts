@@ -14,44 +14,212 @@
  * limitations under the License.
  */
 
-import { Genkit } from 'genkit';
+import {
+  ActionMetadata,
+  embedderRef,
+  Genkit,
+  modelActionMetadata,
+  ToolRequest,
+  ToolRequestPart,
+  ToolResponse,
+  z,
+  type EmbedderReference,
+  type ModelReference,
+} from 'genkit';
 import { logger } from 'genkit/logging';
 import {
   GenerateRequest,
   GenerateResponseData,
+  GenerationCommonConfigDescriptions,
   GenerationCommonConfigSchema,
   getBasicUsageStats,
   MessageData,
+  ModelInfo,
+  modelRef,
+  ToolDefinition,
 } from 'genkit/model';
 import { GenkitPlugin, genkitPlugin } from 'genkit/plugin';
+import { ActionType } from 'genkit/registry';
 import { defineOllamaEmbedder } from './embeddings.js';
 import {
   ApiType,
+  ListLocalModelsResponse,
+  LocalModel,
+  Message,
   ModelDefinition,
+  OllamaTool,
+  OllamaToolCall,
   RequestHeaders,
   type OllamaPluginParams,
 } from './types.js';
 
 export { type OllamaPluginParams };
 
-export function ollama(params: OllamaPluginParams): GenkitPlugin {
-  return genkitPlugin('ollama', async (ai: Genkit) => {
-    const serverAddress = params.serverAddress;
-    params.models?.map((model) =>
-      ollamaModel(ai, model, serverAddress, params.requestHeaders)
-    );
-    params.embedders?.map((model) =>
-      defineOllamaEmbedder(ai, {
-        name: model.name,
-        modelName: model.name,
-        dimensions: model.dimensions,
-        options: params,
-      })
-    );
-  });
+export type OllamaPlugin = {
+  (params?: OllamaPluginParams): GenkitPlugin;
+
+  model(
+    name: string,
+    config?: z.infer<typeof OllamaConfigSchema>
+  ): ModelReference<typeof OllamaConfigSchema>;
+  embedder(name: string, config?: Record<string, any>): EmbedderReference;
+};
+
+const ANY_JSON_SCHEMA: Record<string, any> = {
+  $schema: 'http://json-schema.org/draft-07/schema#',
+};
+
+const GENERIC_MODEL_INFO = {
+  supports: {
+    multiturn: true,
+    media: true,
+    tools: true,
+    toolChoice: true,
+    systemRole: true,
+    constrained: 'all',
+  },
+} as ModelInfo;
+
+const DEFAULT_OLLAMA_SERVER_ADDRESS = 'http://localhost:11434';
+
+async function initializer(
+  ai: Genkit,
+  serverAddress: string,
+  params?: OllamaPluginParams
+) {
+  params?.models?.map((model) =>
+    defineOllamaModel(ai, model, serverAddress, params?.requestHeaders)
+  );
+  params?.embedders?.map((model) =>
+    defineOllamaEmbedder(ai, {
+      name: model.name,
+      modelName: model.name,
+      dimensions: model.dimensions,
+      options: params!,
+    })
+  );
 }
 
-function ollamaModel(
+function resolveAction(
+  ai: Genkit,
+  actionType: ActionType,
+  actionName: string,
+  serverAddress: string,
+  requestHeaders?: RequestHeaders
+) {
+  // We can only dynamically resolve models, for embedders user must provide dimensions.
+  if (actionType === 'model') {
+    defineOllamaModel(
+      ai,
+      {
+        name: actionName,
+      },
+      serverAddress,
+      requestHeaders
+    );
+  }
+}
+
+async function listActions(
+  serverAddress: string,
+  requestHeaders?: RequestHeaders
+): Promise<ActionMetadata[]> {
+  const models = await listLocalModels(serverAddress, requestHeaders);
+  return (
+    models
+      // naively filter out embedders, unfortunately there's no better way.
+      ?.filter((m) => m.model && !m.model.includes('embed'))
+      .map((m) =>
+        modelActionMetadata({
+          name: `ollama/${m.model}`,
+          info: GENERIC_MODEL_INFO,
+        })
+      ) || []
+  );
+}
+
+function ollamaPlugin(params?: OllamaPluginParams): GenkitPlugin {
+  if (!params) {
+    params = {};
+  }
+  if (!params.serverAddress) {
+    params.serverAddress = DEFAULT_OLLAMA_SERVER_ADDRESS;
+  }
+  const serverAddress = params.serverAddress;
+  return genkitPlugin(
+    'ollama',
+    async (ai: Genkit) => {
+      await initializer(ai, serverAddress, params);
+    },
+    async (ai, actionType, actionName) => {
+      resolveAction(
+        ai,
+        actionType,
+        actionName,
+        serverAddress,
+        params?.requestHeaders
+      );
+    },
+    async () => await listActions(serverAddress, params?.requestHeaders)
+  );
+}
+
+async function listLocalModels(
+  serverAddress: string,
+  requestHeaders?: RequestHeaders
+): Promise<LocalModel[]> {
+  // We call the ollama list local models api: https://github.com/ollama/ollama/blob/main/docs/api.md#list-local-models
+  let res;
+  try {
+    res = await fetch(serverAddress + '/api/tags', {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(await getHeaders(serverAddress, requestHeaders)),
+      },
+    });
+  } catch (e) {
+    throw new Error(`Make sure the Ollama server is running.`, {
+      cause: e,
+    });
+  }
+  const modelResponse = JSON.parse(await res.text()) as ListLocalModelsResponse;
+  return modelResponse.models;
+}
+
+/**
+ * Please refer to: https://github.com/ollama/ollama/blob/main/docs/modelfile.md
+ * for further information.
+ */
+export const OllamaConfigSchema = GenerationCommonConfigSchema.extend({
+  temperature: z
+    .number()
+    .min(0.0)
+    .max(1.0)
+    .describe(
+      GenerationCommonConfigDescriptions.temperature +
+        ' The default value is 0.8.'
+    )
+    .optional(),
+  topK: z
+    .number()
+    .min(1)
+    .max(40)
+    .describe(
+      GenerationCommonConfigDescriptions.topK + ' The default value is 40.'
+    )
+    .optional(),
+  topP: z
+    .number()
+    .min(0)
+    .max(1.0)
+    .describe(
+      GenerationCommonConfigDescriptions.topP + ' The default value is 0.9.'
+    )
+    .optional(),
+});
+
+function defineOllamaModel(
   ai: Genkit,
   model: ModelDefinition,
   serverAddress: string,
@@ -61,28 +229,28 @@ function ollamaModel(
     {
       name: `ollama/${model.name}`,
       label: `Ollama - ${model.name}`,
-      configSchema: GenerationCommonConfigSchema,
+      configSchema: OllamaConfigSchema,
       supports: {
         multiturn: !model.type || model.type === 'chat',
         systemRole: true,
+        tools: model.supports?.tools,
       },
     },
     async (input, streamingCallback) => {
-      const options: Record<string, any> = {};
-      if (input.config?.temperature !== undefined) {
-        options.temperature = input.config.temperature;
+      const { topP, topK, stopSequences, maxOutputTokens, ...rest } =
+        input.config as any;
+      const options: Record<string, any> = { ...rest };
+      if (topP !== undefined) {
+        options.top_p = topP;
       }
-      if (input.config?.topP !== undefined) {
-        options.top_p = input.config.topP;
+      if (topK !== undefined) {
+        options.top_k = topK;
       }
-      if (input.config?.topK !== undefined) {
-        options.top_k = input.config.topK;
+      if (stopSequences !== undefined) {
+        options.stop = stopSequences.join('');
       }
-      if (input.config?.stopSequences !== undefined) {
-        options.stop = input.config.stopSequences.join('');
-      }
-      if (input.config?.maxOutputTokens !== undefined) {
-        options.num_predict = input.config.maxOutputTokens;
+      if (maxOutputTokens !== undefined) {
+        options.num_predict = maxOutputTokens;
       }
       const type = model.type ?? 'chat';
       const request = toOllamaRequest(
@@ -94,18 +262,12 @@ function ollamaModel(
       );
       logger.debug(request, `ollama request (${type})`);
 
-      const extraHeaders = requestHeaders
-        ? typeof requestHeaders === 'function'
-          ? await requestHeaders(
-              {
-                serverAddress,
-                model,
-              },
-              input
-            )
-          : requestHeaders
-        : {};
-
+      const extraHeaders = await getHeaders(
+        serverAddress,
+        requestHeaders,
+        model,
+        input
+      );
       let res;
       try {
         res = await fetch(
@@ -181,14 +343,23 @@ function parseMessage(response: any, type: ApiType): MessageData {
     throw new Error(response.error);
   }
   if (type === 'chat') {
-    return {
-      role: toGenkitRole(response.message.role),
-      content: [
-        {
-          text: response.message.content,
-        },
-      ],
-    };
+    // Tool calling is available only on the 'chat' API, not on 'generate'
+    // https://github.com/ollama/ollama/blob/main/docs/api.md#chat-request-with-tools
+    if (response.message.tool_calls && response.message.tool_calls.length > 0) {
+      return {
+        role: toGenkitRole(response.message.role),
+        content: toGenkitToolRequest(response.message.tool_calls),
+      };
+    } else {
+      return {
+        role: toGenkitRole(response.message.role),
+        content: [
+          {
+            text: response.message.content,
+          },
+        ],
+      };
+    }
   } else {
     return {
       role: 'model',
@@ -199,6 +370,25 @@ function parseMessage(response: any, type: ApiType): MessageData {
       ],
     };
   }
+}
+
+async function getHeaders(
+  serverAddress: string,
+  requestHeaders?: RequestHeaders,
+  model?: ModelDefinition,
+  input?: GenerateRequest
+): Promise<Record<string, string> | void> {
+  return requestHeaders
+    ? typeof requestHeaders === 'function'
+      ? await requestHeaders(
+          {
+            serverAddress,
+            model,
+          },
+          input
+        )
+      : requestHeaders
+    : {};
 }
 
 function toOllamaRequest(
@@ -212,24 +402,50 @@ function toOllamaRequest(
     model: name,
     options,
     stream,
+    tools: input.tools?.filter(isValidOllamaTool).map(toOllamaTool),
   };
   if (type === 'chat') {
     const messages: Message[] = [];
     input.messages.forEach((m) => {
       let messageText = '';
+      const role = toOllamaRole(m.role);
       const images: string[] = [];
+      const toolRequests: ToolRequest[] = [];
+      const toolResponses: ToolResponse[] = [];
       m.content.forEach((c) => {
         if (c.text) {
           messageText += c.text;
         }
         if (c.media) {
-          images.push(c.media.url);
+          let imageUri = c.media.url;
+          // ollama doesn't accept full data URIs, just the base64 encoded image,
+          // strip out data URI prefix (ex. `data:image/jpeg;base64,`)
+          if (imageUri.startsWith('data:')) {
+            imageUri = imageUri.substring(imageUri.indexOf(',') + 1);
+          }
+          images.push(imageUri);
+        }
+        if (c.toolRequest) {
+          toolRequests.push(c.toolRequest);
+        }
+        if (c.toolResponse) {
+          toolResponses.push(c.toolResponse);
         }
       });
+      // Add tool responses, if any.
+      toolResponses.forEach((t) => {
+        messages.push({
+          role,
+          content:
+            typeof t.output === 'string' ? t.output : JSON.stringify(t.output),
+        });
+      });
       messages.push({
-        role: toOllamaRole(m.role),
-        content: messageText,
+        role: role,
+        content: toolRequests.length > 0 ? '' : messageText,
         images: images.length > 0 ? images : undefined,
+        tool_calls:
+          toolRequests.length > 0 ? toOllamaToolCall(toolRequests) : undefined,
       });
     });
     request.messages = messages;
@@ -252,6 +468,38 @@ function toGenkitRole(role) {
     return 'model';
   }
   return role; // everything else seems to match
+}
+
+function toOllamaTool(tool: ToolDefinition): OllamaTool {
+  return {
+    type: 'function',
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.inputSchema ?? ANY_JSON_SCHEMA,
+    },
+  };
+}
+
+function toOllamaToolCall(toolRequests: ToolRequest[]): OllamaToolCall[] {
+  return toolRequests.map((t) => ({
+    function: {
+      name: t.name,
+      // This should be safe since we already filtered tools that don't accept
+      // objects
+      arguments: t.input as Record<string, any>,
+    },
+  }));
+}
+
+function toGenkitToolRequest(tool_calls: OllamaToolCall[]): ToolRequestPart[] {
+  return tool_calls.map((t) => ({
+    toolRequest: {
+      name: t.function.name,
+      ref: t.function.index ? t.function.index.toString() : undefined,
+      input: t.function.arguments,
+    },
+  }));
 }
 
 function readChunks(reader) {
@@ -280,8 +528,32 @@ function getSystemMessage(input: GenerateRequest): string {
     .join();
 }
 
-interface Message {
-  role: string;
-  content: string;
-  images?: string[];
+function isValidOllamaTool(tool: ToolDefinition): boolean {
+  if (tool.inputSchema?.type !== 'object') {
+    throw new Error(
+      `Unsupported tool: '${tool.name}'. Ollama only supports tools with object inputs`
+    );
+  }
+  return true;
 }
+
+export const ollama = ollamaPlugin as OllamaPlugin;
+ollama.model = (
+  name: string,
+  config?: z.infer<typeof OllamaConfigSchema>
+): ModelReference<typeof OllamaConfigSchema> => {
+  return modelRef({
+    name: `ollama/${name}`,
+    config,
+    configSchema: OllamaConfigSchema,
+  });
+};
+ollama.embedder = (
+  name: string,
+  config?: Record<string, any>
+): EmbedderReference => {
+  return embedderRef({
+    name: `ollama/${name}`,
+    config,
+  });
+};

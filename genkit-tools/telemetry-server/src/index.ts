@@ -14,21 +14,23 @@
  * limitations under the License.
  */
 
-import { TraceData } from '@genkit-ai/tools-common';
+import {
+  TraceDataSchema,
+  TraceQueryFilterSchema,
+} from '@genkit-ai/tools-common';
 import express from 'express';
 import * as http from 'http';
 import { TraceStore } from './types';
 
-export { FirestoreTraceStore } from './firestoreTraceStore.js';
 export { LocalFileTraceStore } from './localFileTraceStore.js';
-export { TraceStore } from './types';
+export { TraceQuerySchema, type TraceQuery, type TraceStore } from './types';
 
 let server: http.Server;
 
 /**
  * Starts the telemetry server with the provided params
  */
-export function startTelemetryServer(params: {
+export async function startTelemetryServer(params: {
   port: number;
   traceStore: TraceStore;
   /**
@@ -40,6 +42,7 @@ export function startTelemetryServer(params: {
    */
   maxRequestBodySize?: string | number;
 }) {
+  await params.traceStore.init();
   const api = express();
 
   api.use(express.json({ limit: params.maxRequestBodySize ?? '30mb' }));
@@ -48,27 +51,42 @@ export function startTelemetryServer(params: {
     response.status(200).send('OK');
   });
 
-  api.get('/api/traces/:traceId', async (request, response) => {
-    const { traceId } = request.params;
-    response.json(await params.traceStore.load(traceId));
+  api.get('/api/traces/:traceId', async (request, response, next) => {
+    try {
+      const { traceId } = request.params;
+      response.json(await params.traceStore.load(traceId));
+    } catch (e) {
+      next(e);
+    }
   });
 
-  api.post('/api/traces', async (request, response) => {
-    const traceData = request.body as TraceData;
-    await params.traceStore.save(traceData.traceId, traceData);
-    response.status(200).send('OK');
+  api.post('/api/traces', async (request, response, next) => {
+    try {
+      const traceData = TraceDataSchema.parse(request.body);
+      await params.traceStore.save(traceData.traceId, traceData);
+      response.status(200).send('OK');
+    } catch (e) {
+      next(e);
+    }
   });
 
-  api.get('/api/traces', async (request, response) => {
-    const { limit, continuationToken } = request.query;
-    response.json(
-      await params.traceStore.list({
-        limit: limit ? parseInt(limit.toString()) : undefined,
-        continuationToken: continuationToken
-          ? continuationToken.toString()
-          : undefined,
-      })
-    );
+  api.get('/api/traces', async (request, response, next) => {
+    try {
+      const { limit, continuationToken, filter } = request.query;
+      response.json(
+        await params.traceStore.list({
+          limit: limit ? parseInt(limit.toString()) : 10,
+          continuationToken: continuationToken
+            ? continuationToken.toString()
+            : undefined,
+          filter: filter
+            ? TraceQueryFilterSchema.parse(JSON.parse(filter as string))
+            : undefined,
+        })
+      );
+    } catch (e) {
+      next(e);
+    }
   });
 
   api.use((err: any, req: any, res: any, next: any) => {
@@ -100,7 +118,7 @@ export function startTelemetryServer(params: {
 /**
  * Stops Telemetry API and any running dependencies.
  */
-async function stopTelemetryApi() {
+export async function stopTelemetryApi() {
   await Promise.all([
     new Promise<void>((resolve) => {
       if (server) {

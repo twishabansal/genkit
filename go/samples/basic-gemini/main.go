@@ -16,45 +16,39 @@ package main
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"log"
 
 	"github.com/firebase/genkit/go/ai"
+	"github.com/firebase/genkit/go/core"
 	"github.com/firebase/genkit/go/genkit"
-	"github.com/firebase/genkit/go/plugins/googleai"
+	"github.com/firebase/genkit/go/plugins/googlegenai"
 )
 
 func main() {
 	ctx := context.Background()
 
-	g, err := genkit.New(nil)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// Initialize the Google AI plugin. When you pass nil for the
+	// Initialize Genkit with the Google AI plugin. When you pass nil for the
 	// Config parameter, the Google AI plugin will get the API key from the
-	// GOOGLE_GENAI_API_KEY environment variable, which is the recommended
+	// GEMINI_API_KEY or GOOGLE_API_KEY environment variable, which is the recommended
 	// practice.
-	if err := googleai.Init(ctx, g, nil); err != nil {
+	g, err := genkit.Init(ctx, genkit.WithPlugins(&googlegenai.GoogleAI{}))
+	if err != nil {
 		log.Fatal(err)
 	}
 
 	// Define a simple flow that generates jokes about a given topic
 	genkit.DefineFlow(g, "jokesFlow", func(ctx context.Context, input string) (string, error) {
-		m := googleai.Model(g, "gemini-1.5-flash")
+		m := googlegenai.GoogleAIModel(g, "gemini-2.5-pro-preview-03-25")
 		if m == nil {
-			return "", errors.New("jokesFlow: failed to find model")
+			return "", core.NewError(core.INVALID_ARGUMENT, "jokesFlow: failed to find model")
 		}
 
 		resp, err := genkit.Generate(ctx, g,
 			ai.WithModel(m),
-			ai.WithConfig(&ai.GenerationCommonConfig{
-				Temperature: 1,
-				Version:     "gemini-1.5-flash-002",
+			ai.WithConfig(&googlegenai.GeminiConfig{
+				Temperature: 1.0,
 			}),
-			ai.WithTextPrompt(fmt.Sprintf(`Tell silly short jokes about %s`, input)))
+			ai.WithPrompt(`Tell silly short jokes about %s`, input))
 		if err != nil {
 			return "", err
 		}
@@ -63,7 +57,5 @@ func main() {
 		return text, nil
 	})
 
-	if err := g.Start(ctx, nil); err != nil {
-		log.Fatal(err)
-	}
+	<-ctx.Done()
 }

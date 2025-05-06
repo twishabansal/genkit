@@ -14,10 +14,13 @@
  * limitations under the License.
  */
 
+import { genkitEval, GenkitMetric } from '@genkit-ai/evaluator';
 import { defineFirestoreRetriever } from '@genkit-ai/firebase';
 import { enableGoogleCloudTelemetry } from '@genkit-ai/google-cloud';
 import {
   gemini15Flash,
+  gemini20Flash,
+  gemini20FlashExp,
   googleAI,
   gemini10Pro as googleGemini10Pro,
 } from '@genkit-ai/googleai';
@@ -30,7 +33,7 @@ import { GoogleAIFileManager } from '@google/generative-ai/server';
 import { AlwaysOnSampler } from '@opentelemetry/sdk-trace-base';
 import { initializeApp } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
-import { GenerateResponseData, MessageSchema, genkit, z } from 'genkit/beta';
+import { GenerateResponseData, genkit, MessageSchema, z } from 'genkit';
 import { logger } from 'genkit/logging';
 import { ModelMiddleware, simulateConstrainedGeneration } from 'genkit/model';
 import { PluginProvider } from 'genkit/plugin';
@@ -59,6 +62,13 @@ const ai = genkit({
   plugins: [
     googleAI({ experimental_debugTraces: true }),
     vertexAI({ location: 'us-central1', experimental_debugTraces: true }),
+    genkitEval({
+      metrics: [
+        GenkitMetric.DEEP_EQUAL,
+        GenkitMetric.REGEX,
+        GenkitMetric.JSONATA,
+      ],
+    }),
   ],
 });
 
@@ -94,9 +104,9 @@ export const jokeFlow = ai.defineFlow(
   {
     name: 'jokeFlow',
     inputSchema: z.object({
-      modelName: z.string(),
-      modelVersion: z.string().optional(),
-      subject: z.string(),
+      modelName: z.string().default('vertexai/gemini-2.5-pro-exp-03-25'),
+      modelVersion: z.string().optional().default('gemini-2.5-pro-exp-03-25'),
+      subject: z.string().default('bananas'),
     }),
     outputSchema: z.string(),
   },
@@ -129,16 +139,36 @@ export const drawPictureFlow = ai.defineFlow(
   }
 );
 
-export const streamFlow = ai.defineFlow(
+export const streamFlowVertex = ai.defineFlow(
   {
-    name: 'streamFlow',
+    name: 'streamFlowVertex',
     inputSchema: z.string(),
     outputSchema: z.string(),
     streamSchema: z.string(),
   },
   async (prompt, { sendChunk }) => {
     const { response, stream } = ai.generateStream({
-      model: gemini15Flash,
+      model: vertexAI.model('gemini-2.0-flash-001', { temperature: 0.77 }),
+      prompt,
+    });
+
+    for await (const chunk of stream) {
+      sendChunk(chunk.content[0].text!);
+    }
+
+    return (await response).text;
+  }
+);
+export const streamFlowGemini = ai.defineFlow(
+  {
+    name: 'streamFlowGemini',
+    inputSchema: z.string(),
+    outputSchema: z.string(),
+    streamSchema: z.string(),
+  },
+  async (prompt, { sendChunk }) => {
+    const { response, stream } = ai.generateStream({
+      model: googleAI.model('gemini-2.0-flash-001', { temperature: 0.77 }),
       prompt,
     });
 
@@ -447,6 +477,48 @@ export const toolCaller = ai.defineFlow(
   }
 );
 
+export const dynamicToolCaller = ai.defineFlow(
+  {
+    name: 'dynamicToolCaller',
+    inputSchema: z.number().default(5),
+    outputSchema: z.string(),
+    streamSchema: z.any(),
+  },
+  async (input, { sendChunk }) => {
+    const dynamicGablorkenTool = ai.dynamicTool(
+      {
+        name: 'dynamicGablorkenTool',
+        inputSchema: z.object({
+          value: z
+            .number()
+            .describe(
+              'always add 1 to the value (it is 1 based, but upstream it is zero based)'
+            ),
+        }),
+        description: 'can be used to calculate gablorken value',
+      },
+      async (input) => {
+        return input.value * 3 - 4;
+      }
+    );
+
+    const { response, stream } = ai.generateStream({
+      model: googleAI.model('gemini-2.0-flash'),
+      config: {
+        temperature: 1,
+      },
+      tools: [dynamicGablorkenTool],
+      prompt: `what is a gablorken of ${input}`,
+    });
+
+    for await (const chunk of stream) {
+      sendChunk(chunk);
+    }
+
+    return (await response).text;
+  }
+);
+
 const exitTool = ai.defineTool(
   {
     name: 'exitTool',
@@ -730,7 +802,7 @@ ai.defineFlow('formatJsonManualSchema', async (input, { sendChunk }) => {
   const { output, text } = await ai.generate({
     model: gemini15Flash,
     prompt: `generate one RPG game character of type ${input || 'archer'} and generated JSON must match this interface
-    
+
     \`\`\`typescript
     interface Character {
       name: string;
@@ -789,4 +861,87 @@ ai.defineFlow('formatJsonl', async (input, { sendChunk }) => {
     onChunk: (c) => sendChunk(c.output),
   });
   return output;
+});
+
+ai.defineFlow('simpleDataExtractor', async (input) => {
+  const { output } = await ai.generate({
+    model: gemini15Flash,
+    prompt: `extract data from:\n\n${input}`,
+    output: {
+      schema: z.object({
+        name: z.string(),
+        age: z.number(),
+      }),
+    },
+  });
+  return output;
+});
+
+ai.defineFlow('echo', async (input) => {
+  return input;
+});
+
+ai.defineFlow(
+  {
+    name: 'youtube',
+    inputSchema: z.object({
+      url: z.string(),
+      prompt: z.string(),
+      model: z.string().optional(),
+    }),
+  },
+  async ({ url, prompt, model }) => {
+    const { text } = await ai.generate({
+      model: model || 'googleai/gemini-2.0-flash',
+      prompt: [{ text: prompt }, { media: { url, contentType: 'video/mp4' } }],
+    });
+    return text;
+  }
+);
+
+ai.defineFlow(
+  {
+    name: 'geminiImages',
+    inputSchema: z.string().optional(),
+  },
+  async (setting) => {
+    const { message } = await ai.generate({
+      model: gemini20FlashExp,
+      prompt: `Generate a choose your own adventure intro${setting ? ` in ${setting}` : ''}, then generate a first-person image as if I'm in the story.`,
+      config: {
+        responseModalities: ['TEXT', 'IMAGE'],
+      },
+    });
+
+    return message?.content;
+  }
+);
+
+ai.defineFlow('geminiEnum', async (thing) => {
+  const { output } = await ai.generate({
+    model: gemini20Flash,
+    prompt: `What type of thing is ${thing || 'a banana'}?`,
+    output: {
+      schema: z.object({
+        type: z.enum(['FRUIT', 'VEGETABLE', 'MINERAL']),
+      }),
+    },
+  });
+
+  return output;
+});
+
+ai.defineFlow('embedders-tester', async () => {
+  console.log(
+    await ai.embed({
+      content: 'hello world',
+      embedder: googleAI.embedder('text-embedding-004'),
+    })
+  );
+  console.log(
+    await ai.embed({
+      content: 'hello world',
+      embedder: vertexAI.embedder('text-embedding-004'),
+    })
+  );
 });

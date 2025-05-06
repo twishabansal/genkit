@@ -7,7 +7,7 @@
     "genai",
     "generative-ai"
   ],
-  "version": "1.0.5",
+  "version": "1.8.0",
   "type": "commonjs",
   "scripts": {
     "check": "tsc",
@@ -16,7 +16,7 @@
     "build": "npm-run-all genversion build:clean check compile",
     "build:watch": "tsup-node --watch",
     "test": "node --import tsx --test tests/*_test.ts",
-    "genversion": "genversion -es src/__codegen/version.ts"
+    "genversion": "genversion -esf src/__codegen/version.ts"
   },
   "repository": {
     "type": "git",
@@ -43,7 +43,7 @@
     "json-schema": "^0.4.0",
     "zod": "^3.23.8",
     "zod-to-json-schema": "^3.22.4",
-    "dotprompt": "^1.0.0"
+    "dotprompt": "^1.1.1"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",

@@ -56,7 +56,11 @@ func (pm *programmableModel) Generate(ctx context.Context, r *registry.Registry,
 
 func defineProgrammableModel(r *registry.Registry) *programmableModel {
 	pm := &programmableModel{r: r}
-	DefineModel(r, "default", "programmableModel", nil, func(ctx context.Context, req *ModelRequest, cb ModelStreamingCallback) (*ModelResponse, error) {
+	supports := &ModelSupports{
+		Tools:     true,
+		Multiturn: true,
+	}
+	DefineModel(r, "", "programmableModel", &ModelInfo{Supports: supports}, func(ctx context.Context, req *ModelRequest, cb ModelStreamCallback) (*ModelResponse, error) {
 		return pm.Generate(ctx, r, req, &ToolConfig{MaxTurns: 5}, cb)
 	})
 	return pm
@@ -81,6 +85,7 @@ func TestGenerateAction(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to create registry: %v", err)
 			}
+			ConfigureFormats(r)
 
 			pm := defineProgrammableModel(r)
 
@@ -102,7 +107,7 @@ func TestGenerateAction(t *testing.T) {
 					resp := tc.ModelResponses[reqCounter]
 					resp.Request = req
 					resp.Custom = map[string]any{}
-					resp.Request.Output = &ModelRequestOutput{}
+					resp.Request.Output = &ModelOutputConfig{}
 					resp.Usage = &GenerationUsage{}
 					reqCounter++
 					return resp, nil

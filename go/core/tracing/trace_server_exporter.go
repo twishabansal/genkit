@@ -1,6 +1,18 @@
-// Copyright 2024 Google LLC
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
 // SPDX-License-Identifier: Apache-2.0
-
 
 package tracing
 
@@ -11,6 +23,7 @@ import (
 	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/sdk/instrumentation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	otrace "go.opentelemetry.io/otel/trace"
 )
@@ -90,7 +103,7 @@ func convertSpan(span sdktrace.ReadOnlySpan) *SpanData {
 		Attributes:              attributesToMap(span.Attributes()),
 		DisplayName:             span.Name(),
 		Links:                   convertLinks(span.Links()),
-		InstrumentationLibrary:  InstrumentationLibrary(span.InstrumentationLibrary()),
+		InstrumentationScope:    convertScope(span.InstrumentationScope()),
 		SpanKind:                strings.ToUpper(span.SpanKind().String()),
 		SameProcessAsParentSpan: BoolValue{!sc.IsRemote()},
 		Status:                  convertStatus(span.Status()),
@@ -98,7 +111,9 @@ func convertSpan(span sdktrace.ReadOnlySpan) *SpanData {
 	if p := span.Parent(); p.HasSpanID() {
 		sd.ParentSpanID = p.SpanID().String()
 	}
-	sd.TimeEvents.TimeEvent = convertEvents(span.Events())
+	if len(span.Events()) > 0 {
+		sd.TimeEvents.TimeEvent = convertEvents(span.Events())
+	}
 	return sd
 }
 
@@ -108,6 +123,15 @@ func attributesToMap(attrs []attribute.KeyValue) map[string]any {
 		m[string(a.Key)] = a.Value.AsInterface()
 	}
 	return m
+}
+
+// convertScope converts an OpenTelemetry InstrumentationScope to an InstrumentationScope
+func convertScope(s instrumentation.Scope) InstrumentationScope {
+	return InstrumentationScope{
+		Name:      s.Name,
+		Version:   s.Version,
+		SchemaURL: s.SchemaURL,
+	}
 }
 
 func convertLinks(links []sdktrace.Link) []*Link {

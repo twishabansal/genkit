@@ -16,6 +16,7 @@
 
 import { Action, defineAction, z } from '@genkit-ai/core';
 import { Registry } from '@genkit-ai/core/registry';
+import { toJsonSchema } from '@genkit-ai/core/schema';
 import { Part, PartSchema } from './document.js';
 import { Document, DocumentData, DocumentDataSchema } from './retriever.js';
 
@@ -25,13 +26,18 @@ export type RerankerFn<RerankerOptions extends z.ZodTypeAny> = (
   queryOpts: z.infer<RerankerOptions>
 ) => Promise<RerankerResponse>;
 
+/**
+ * Zod schema for a reranked document metadata.
+ */
+export const RankedDocumentMetadataSchema = z
+  .object({
+    score: z.number(), // Enforces that 'score' must be a number
+  })
+  .passthrough(); // Allows other properties in 'metadata' with any type
+
 export const RankedDocumentDataSchema = z.object({
   content: z.array(PartSchema),
-  metadata: z
-    .object({
-      score: z.number(), // Enforces that 'score' must be a number
-    })
-    .passthrough(), // Allows other properties in 'metadata' with any type
+  metadata: RankedDocumentMetadataSchema,
 });
 
 export type RankedDocumentData = z.infer<typeof RankedDocumentDataSchema>;
@@ -119,6 +125,11 @@ export function defineReranker<OptionsType extends z.ZodTypeAny = z.ZodTypeAny>(
       metadata: {
         type: 'reranker',
         info: options.info,
+        reranker: {
+          customOptions: options.configSchema
+            ? toJsonSchema({ schema: options.configSchema })
+            : undefined,
+        },
       },
     },
     (i) =>

@@ -1,4 +1,17 @@
-// Copyright 2024 Google LLC
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
 // SPDX-License-Identifier: Apache-2.0
 
 package ai
@@ -15,27 +28,36 @@ import (
 	"github.com/firebase/genkit/go/internal/registry"
 )
 
-const provider = "local"
-
-// A ToolDef is an implementation of a single tool.
-type ToolDef[In, Out any] struct {
-	action *core.Action[In, Out, struct{}]
+// ToolRef is a reference to a tool.
+type ToolRef interface {
+	Name() string
 }
 
-// toolAction is genericless version of ToolDef. It's required to make
-// LookupTool possible.
-type toolAction struct {
+// ToolName is a distinct type for a tool name.
+// It is meant to be passed where a ToolRef is expected but no Tool is had.
+type ToolName string
+
+// Name returns the name of the tool.
+func (t ToolName) Name() string {
+	return (string)(t)
+}
+
+// A ToolDef is an implementation of a single tool.
+type ToolDef[In, Out any] core.ActionDef[In, Out, struct{}]
+
+// tool is genericless version of ToolDef. It's required to make [LookupTool] possible.
+type tool struct {
+	// action is the underlying internal action. It's needed for the descriptor.
 	action action.Action
 }
 
 // Tool represents an instance of a tool.
 type Tool interface {
+	// Name returns the name of the tool.
+	Name() string
 	// Definition returns ToolDefinition for for this tool.
 	Definition() *ToolDefinition
-	// Action returns the action instance that backs this tools.
-	Action() action.Action
-	// RunRaw runs this tool using the provided raw map format data (JSON parsed
-	// as map[string]any).
+	// RunRaw runs this tool using the provided raw input.
 	RunRaw(ctx context.Context, input any) (any, error)
 }
 
@@ -56,13 +78,15 @@ type InterruptOptions struct {
 // ToolContext provides context and utility functions for tool execution.
 type ToolContext struct {
 	context.Context
+	// Interrupt is a function that can be used to interrupt the tool execution.
+	// Interrupting tool execution returns the control to the caller with the
+	// total model response so far.
 	Interrupt func(opts *InterruptOptions) error
 }
 
 // DefineTool defines a tool function with interrupt capability
 func DefineTool[In, Out any](r *registry.Registry, name, description string,
-	fn func(ctx *ToolContext, input In) (Out, error)) *ToolDef[In, Out] {
-
+	fn func(ctx *ToolContext, input In) (Out, error)) Tool {
 	metadata := make(map[string]any)
 	metadata["type"] = "tool"
 	metadata["name"] = name
@@ -80,78 +104,85 @@ func DefineTool[In, Out any](r *registry.Registry, name, description string,
 		return fn(toolCtx, input)
 	}
 
-	toolAction := core.DefineAction(r, provider, name, atype.Tool, metadata, wrappedFn)
-	return &ToolDef[In, Out]{
-		action: toolAction,
-	}
+	toolAction := core.DefineAction(r, "", name, atype.Tool, metadata, wrappedFn)
+
+	return &tool{action: toolAction}
 }
 
-// Action returns the action instance that backs this tools.
-func (ta *ToolDef[In, Out]) Action() action.Action {
-	return ta.action
+// Name returns the name of the tool.
+func (ta *tool) Name() string {
+	return ta.Definition().Name
 }
 
-// Action returns the action instance that backs this tools.
-func (ta *toolAction) Action() action.Action {
-	return ta.action
+// Name returns the name of the tool.
+func (t *ToolDef[In, Out]) Name() string {
+	return t.Definition().Name
 }
 
-// Definition returns ToolDefinition for for this tool.
-func (ta *ToolDef[In, Out]) Definition() *ToolDefinition {
-	return definition(ta)
+// Definition returns [ToolDefinition] for for this tool.
+func (t *ToolDef[In, Out]) Definition() *ToolDefinition {
+	return definition((*core.ActionDef[In, Out, struct{}])(t).Desc())
 }
 
-// Definition returns ToolDefinition for for this tool.
-func (ta *toolAction) Definition() *ToolDefinition {
-	return definition(ta)
+// Definition returns [ToolDefinition] for for this tool.
+func (t *tool) Definition() *ToolDefinition {
+	return definition(t.action.Desc())
 }
 
-func definition(ta Tool) *ToolDefinition {
+func definition(desc action.Desc) *ToolDefinition {
 	td := &ToolDefinition{
-		Name:        ta.Action().Desc().Metadata["name"].(string),
-		Description: ta.Action().Desc().Metadata["description"].(string),
+		Name:        desc.Metadata["name"].(string),
+		Description: desc.Metadata["description"].(string),
 	}
-	if ta.Action().Desc().InputSchema != nil {
-		td.InputSchema = base.SchemaAsMap(ta.Action().Desc().InputSchema)
+	if desc.InputSchema != nil {
+		td.InputSchema = base.SchemaAsMap(desc.InputSchema)
 	}
-	if ta.Action().Desc().OutputSchema != nil {
-		td.OutputSchema = base.SchemaAsMap(ta.Action().Desc().OutputSchema)
+	if desc.OutputSchema != nil {
+		td.OutputSchema = base.SchemaAsMap(desc.OutputSchema)
 	}
 	return td
 }
 
 // RunRaw runs this tool using the provided raw map format data (JSON parsed
 // as map[string]any).
-func (ta *toolAction) RunRaw(ctx context.Context, input any) (any, error) {
-	return runAction(ctx, ta, input)
-
+func (t *tool) RunRaw(ctx context.Context, input any) (any, error) {
+	return runAction(ctx, t.Definition(), t.action, input)
 }
 
 // RunRaw runs this tool using the provided raw map format data (JSON parsed
 // as map[string]any).
-func (ta *ToolDef[In, Out]) RunRaw(ctx context.Context, input any) (any, error) {
-	return runAction(ctx, ta, input)
+func (t *ToolDef[In, Out]) RunRaw(ctx context.Context, input any) (any, error) {
+	return runAction(ctx, t.Definition(), (*core.ActionDef[In, Out, struct{}])(t), input)
 }
 
-func runAction(ctx context.Context, action Tool, input any) (any, error) {
+// runAction runs the given action with the provided raw input and returns the output in raw format.
+func runAction(ctx context.Context, def *ToolDefinition, action core.Action, input any) (any, error) {
 	mi, err := json.Marshal(input)
 	if err != nil {
-		return nil, fmt.Errorf("error marshalling tool input for %v: %v", action.Definition().Name, err)
+		return nil, fmt.Errorf("error marshalling tool input for %v: %v", def.Name, err)
 	}
-	output, err := action.Action().RunJSON(ctx, mi, nil)
+	output, err := action.RunJSON(ctx, mi, nil)
 	if err != nil {
-		return nil, fmt.Errorf("error calling tool %v: %w", action.Definition().Name, err)
+		return nil, fmt.Errorf("error calling tool %v: %w", def.Name, err)
 	}
 
 	var uo any
 	err = json.Unmarshal(output, &uo)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing tool output for %v: %v", action.Definition().Name, err)
+		return nil, fmt.Errorf("error parsing tool output for %v: %v", def.Name, err)
 	}
 	return uo, nil
 }
 
 // LookupTool looks up the tool in the registry by provided name and returns it.
 func LookupTool(r *registry.Registry, name string) Tool {
-	return &toolAction{action: r.LookupAction(fmt.Sprintf("/tool/local/%s", name))}
+	if name == "" {
+		return nil
+	}
+
+	action := r.LookupAction(fmt.Sprintf("/%s/%s", atype.Tool, name))
+	if action == nil {
+		return nil
+	}
+	return &tool{action: action}
 }

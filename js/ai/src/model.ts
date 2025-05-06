@@ -16,6 +16,7 @@
 
 import {
   Action,
+  ActionMetadata,
   defineAction,
   GenkitError,
   getStreamingCallback,
@@ -27,123 +28,48 @@ import { logger } from '@genkit-ai/core/logging';
 import { Registry } from '@genkit-ai/core/registry';
 import { toJsonSchema } from '@genkit-ai/core/schema';
 import { performance } from 'node:perf_hooks';
-import { DocumentDataSchema } from './document.js';
+import {
+  CustomPart,
+  CustomPartSchema,
+  DataPart,
+  DataPartSchema,
+  DocumentDataSchema,
+  MediaPart,
+  MediaPartSchema,
+  TextPart,
+  TextPartSchema,
+  ToolRequestPart,
+  ToolRequestPartSchema,
+  ToolResponsePart,
+  ToolResponsePartSchema,
+} from './document.js';
 import {
   augmentWithContext,
   simulateConstrainedGeneration,
   validateSupport,
 } from './model/middleware.js';
 export { defineGenerateAction } from './generate/action.js';
-export { simulateConstrainedGeneration };
+// Export imports from document.js to retain API compatibility
+export {
+  CustomPartSchema,
+  DataPartSchema,
+  MediaPartSchema,
+  simulateConstrainedGeneration,
+  TextPartSchema,
+  ToolRequestPartSchema,
+  ToolResponsePartSchema,
+  type CustomPart,
+  type DataPart,
+  type MediaPart,
+  type TextPart,
+  type ToolRequestPart,
+  type ToolResponsePart,
+};
 
 //
 // IMPORTANT: Please keep type definitions in sync with
 //   genkit-tools/src/types/model.ts
 //
-
-const EmptyPartSchema = z.object({
-  text: z.never().optional(),
-  media: z.never().optional(),
-  toolRequest: z.never().optional(),
-  toolResponse: z.never().optional(),
-  data: z.unknown().optional(),
-  metadata: z.record(z.unknown()).optional(),
-  custom: z.record(z.unknown()).optional(),
-});
-
-/**
- * Zod schema for a text part.
- */
-export const TextPartSchema = EmptyPartSchema.extend({
-  /** The text of the message. */
-  text: z.string(),
-});
-
-/**
- * Text part.
- */
-export type TextPart = z.infer<typeof TextPartSchema>;
-
-/**
- * Zod schema of a media part.
- */
-export const MediaPartSchema = EmptyPartSchema.extend({
-  media: z.object({
-    /** The media content type. Inferred from data uri if not provided. */
-    contentType: z.string().optional(),
-    /** A `data:` or `https:` uri containing the media content.  */
-    url: z.string(),
-  }),
-});
-
-/**
- * Media part.
- */
-export type MediaPart = z.infer<typeof MediaPartSchema>;
-
-/**
- * Zod schema of a tool request part.
- */
-export const ToolRequestPartSchema = EmptyPartSchema.extend({
-  /** A request for a tool to be executed, usually provided by a model. */
-  toolRequest: z.object({
-    /** The call id or reference for a specific request. */
-    ref: z.string().optional(),
-    /** The name of the tool to call. */
-    name: z.string(),
-    /** The input parameters for the tool, usually a JSON object. */
-    input: z.unknown().optional(),
-  }),
-});
-
-/**
- * Tool part.
- */
-export type ToolRequestPart = z.infer<typeof ToolRequestPartSchema>;
-
-/**
- * Zod schema of a tool response part.
- */
-export const ToolResponsePartSchema = EmptyPartSchema.extend({
-  /** A provided response to a tool call. */
-  toolResponse: z.object({
-    /** The call id or reference for a specific request. */
-    ref: z.string().optional(),
-    /** The name of the tool. */
-    name: z.string(),
-    /** The output data returned from the tool, usually a JSON object. */
-    output: z.unknown().optional(),
-  }),
-});
-
-/**
- * Tool response part.
- */
-export type ToolResponsePart = z.infer<typeof ToolResponsePartSchema>;
-
-/**
- * Zod schema of a data part.
- */
-export const DataPartSchema = EmptyPartSchema.extend({
-  data: z.unknown(),
-});
-
-/**
- * Data part.
- */
-export type DataPart = z.infer<typeof DataPartSchema>;
-
-/**
- * Zod schema of a custom part.
- */
-export const CustomPartSchema = EmptyPartSchema.extend({
-  custom: z.record(z.any()),
-});
-
-/**
- * Custom part.
- */
-export type CustomPart = z.infer<typeof CustomPartSchema>;
 
 /**
  * Zod schema of message part.
@@ -194,6 +120,8 @@ export const ModelInfoSchema = z.object({
   versions: z.array(z.string()).optional(),
   /** Friendly label for this model (e.g. "Google AI - Gemini Pro") */
   label: z.string().optional(),
+  /** Model Specific configuration. */
+  configSchema: z.record(z.any()).optional(),
   /** Supported model capabilities. */
   supports: z
     .object({
@@ -260,17 +188,58 @@ export const ToolDefinitionSchema = z.object({
 export type ToolDefinition = z.infer<typeof ToolDefinitionSchema>;
 
 /**
+ * Configuration parameter descriptions.
+ */
+export const GenerationCommonConfigDescriptions = {
+  temperature:
+    'Controls the degree of randomness in token selection. A lower value is ' +
+    'good for a more predictable response. A higher value leads to more ' +
+    'diverse or unexpected results.',
+  maxOutputTokens: 'The maximum number of tokens to include in the response.',
+  topK: 'The maximum number of tokens to consider when sampling.',
+  topP:
+    'Decides how many possible words to consider. A higher value means ' +
+    'that the model looks at more possible words, even the less likely ' +
+    'ones, which makes the generated text more diverse.',
+};
+
+/**
  * Zod schema of a common config object.
  */
-export const GenerationCommonConfigSchema = z.object({
-  /** A specific version of a model family, e.g. `gemini-1.0-pro-001` for the `gemini-1.0-pro` family. */
-  version: z.string().optional(),
-  temperature: z.number().optional(),
-  maxOutputTokens: z.number().optional(),
-  topK: z.number().optional(),
-  topP: z.number().optional(),
-  stopSequences: z.array(z.string()).optional(),
-});
+export const GenerationCommonConfigSchema = z
+  .object({
+    version: z
+      .string()
+      .describe(
+        'A specific version of a model family, e.g. `gemini-2.0-flash` ' +
+          'for the `googleai` family.'
+      )
+      .optional(),
+    temperature: z
+      .number()
+      .describe(GenerationCommonConfigDescriptions.temperature)
+      .optional(),
+    maxOutputTokens: z
+      .number()
+      .describe(GenerationCommonConfigDescriptions.maxOutputTokens)
+      .optional(),
+    topK: z
+      .number()
+      .describe(GenerationCommonConfigDescriptions.topK)
+      .optional(),
+    topP: z
+      .number()
+      .describe(GenerationCommonConfigDescriptions.topP)
+      .optional(),
+    stopSequences: z
+      .array(z.string())
+      .length(5)
+      .describe(
+        'Set of character sequences (up to 5) that will stop output generation.'
+      )
+      .optional(),
+  })
+  .passthrough();
 
 /**
  * Common config object.
@@ -284,7 +253,6 @@ export const OutputConfigSchema = z.object({
   format: z.string().optional(),
   schema: z.record(z.any()).optional(),
   constrained: z.boolean().optional(),
-  instructions: z.string().optional(),
   contentType: z.string().optional(),
 });
 
@@ -354,7 +322,7 @@ export const GenerationUsageSchema = z.object({
 export type GenerationUsage = z.infer<typeof GenerationUsageSchema>;
 
 /** Model response finish reason enum. */
-const FinishReasonSchema = z.enum([
+export const FinishReasonSchema = z.enum([
   'stop',
   'length',
   'blocked',
@@ -548,6 +516,34 @@ export interface ModelReference<CustomOptions extends z.ZodTypeAny> {
   withVersion(version: string): ModelReference<CustomOptions>;
 }
 
+/**
+ * Packages model information into ActionMetadata object.
+ */
+export function modelActionMetadata({
+  name,
+  info,
+  configSchema,
+}: {
+  name: string;
+  info?: ModelInfo;
+  configSchema?: z.ZodTypeAny;
+}): ActionMetadata {
+  return {
+    actionType: 'model',
+    name: name,
+    inputJsonSchema: toJsonSchema({ schema: GenerateRequestSchema }),
+    outputJsonSchema: toJsonSchema({ schema: GenerateResponseSchema }),
+    metadata: {
+      model: {
+        ...info,
+        customOptions: configSchema
+          ? toJsonSchema({ schema: configSchema })
+          : undefined,
+      },
+    },
+  } as ActionMetadata;
+}
+
 /** Cretes a model reference. */
 export function modelRef<
   CustomOptionsSchema extends z.ZodTypeAny = z.ZodTypeAny,
@@ -631,9 +627,10 @@ function getPartCounts(parts: Part[]): PartCounts {
   );
 }
 
-export type ModelArgument<
-  CustomOptions extends z.ZodTypeAny = typeof GenerationCommonConfigSchema,
-> = ModelAction<CustomOptions> | ModelReference<CustomOptions> | string;
+export type ModelArgument<CustomOptions extends z.ZodTypeAny = z.ZodTypeAny> =
+  | ModelAction<CustomOptions>
+  | ModelReference<CustomOptions>
+  | string;
 
 export interface ResolvedModel<
   CustomOptions extends z.ZodTypeAny = z.ZodTypeAny,

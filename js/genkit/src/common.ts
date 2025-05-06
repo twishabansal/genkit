@@ -32,9 +32,12 @@ export {
   RoleSchema,
   ToolCallSchema,
   ToolSchema,
+  embedderActionMetadata,
   embedderRef,
   evaluatorRef,
   indexerRef,
+  modelActionMetadata,
+  modelRef,
   rerankerRef,
   retrieverRef,
   type DocumentData,
@@ -94,7 +97,9 @@ export {
   type ToolArgument,
   type ToolCall,
   type ToolConfig,
+  type ToolRequest,
   type ToolRequestPart,
+  type ToolResponse,
   type ToolResponsePart,
 } from '@genkit-ai/ai';
 export { Chat } from '@genkit-ai/ai/chat';
