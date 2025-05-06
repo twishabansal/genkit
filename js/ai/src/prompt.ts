@@ -449,8 +449,6 @@ function wrapInExecutablePrompt<
     input?: I,
     opts?: PromptGenerateOptions<O, CustomOptions>
   ): Promise<GenerateResponse<z.infer<O>>> => {
-    logger.debug('EXEC');
-
     return await runInNewSpan(
       registry,
       {
@@ -476,8 +474,6 @@ function wrapInExecutablePrompt<
     input?: I,
     opts?: PromptGenerateOptions<O, CustomOptions>
   ): Promise<GenerateOptions<O, CustomOptions>> => {
-    logger.debug('\n\nRENDER\n\n');
-
     return {
       ...(await renderOptionsFn(input, opts)),
     } as GenerateOptions<O, CustomOptions>;
